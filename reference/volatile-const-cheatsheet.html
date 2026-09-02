@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reference — volatile & const Cheat Sheet</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    body { max-width: 860px; }
+    .ref-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin: 1.5rem 0; }
+    .ref-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.2rem;
+    }
+    .ref-card h4 { margin-bottom: 0.5rem; font-size: 0.95rem; }
+    .ref-card pre { margin: 0.6rem 0 0; font-size: 0.82rem; }
+    @media (max-width: 600px) { .ref-grid { grid-template-columns: 1fr; } }
+    @media print {
+      .ref-card { border-color: #ddd; background: #fafafa; }
+      body { max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+  <h1>volatile &amp; const — Quick Reference</h1>
+  <p class="lesson-subtitle">The cheat sheet you tape above your desk. Print-friendly.</p>
+
+  <div class="lesson-meta">
+    <span>📋 Reference</span>
+    <span>🔗 <a href="../lessons/0001-volatile-and-const.html">Lesson 01</a></span>
+  </div>
+
+  <h2>Declaration Patterns</h2>
+
+  <div class="ref-grid">
+    <div class="ref-card">
+      <h4>Standard R/W Register</h4>
+      <pre><code><span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span> <span class="kw">const</span> REG <span class="op">=</span>
+    (<span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span>)<span class="num">0xADDR</span>;</code></pre>
+      <p>Pointer locked. Data volatile. Most common.</p>
+    </div>
+    <div class="ref-card">
+      <h4>Read-Only Register</h4>
+      <pre><code><span class="kw">volatile</span> <span class="kw">const</span> <span class="ty">uint32_t</span> <span class="op">*</span> <span class="kw">const</span> REG <span class="op">=</span>
+    (<span class="kw">volatile</span> <span class="kw">const</span> <span class="ty">uint32_t</span> <span class="op">*</span>)<span class="num">0xADDR</span>;</code></pre>
+      <p>Pointer locked. Data read-only but hardware-updated.</p>
+    </div>
+    <div class="ref-card">
+      <h4>ISR-Shared Flag</h4>
+      <pre><code><span class="kw">volatile</span> <span class="ty">uint8_t</span> flag <span class="op">=</span> <span class="num">0</span>;
+<span class="cm">// Set in ISR, checked in main</span></code></pre>
+      <p>No pointer needed. Just volatile on the variable.</p>
+    </div>
+    <div class="ref-card">
+      <h4>Flash Lookup Table</h4>
+      <pre><code><span class="kw">const</span> <span class="ty">uint16_t</span> table[] <span class="op">=</span> { <span class="num">0</span>, <span class="num">100</span>, <span class="num">200</span> };
+<span class="cm">// Stored in Flash, not RAM</span></code></pre>
+      <p>No volatile needed — value never changes.</p>
+    </div>
+  </div>
+
+  <h2>Decision Flowchart</h2>
+
+  <table>
+    <thead>
+      <tr><th>Question</th><th>If Yes →</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Can hardware or an ISR change this value?</td><td>Add <code>volatile</code> to the data type</td></tr>
+      <tr><td>Is the memory address fixed forever?</td><td>Add <code>const</code> after the <code>*</code></td></tr>
+      <tr><td>Should my code never write to this?</td><td>Add <code>const</code> before the <code>*</code> (on the data type)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Right-to-Left Reading Rule</h2>
+
+  <pre><code><span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span> <span class="kw">const</span> REG
+         ↑              ↑       ↑
+         │              │       └── REG is a ...
+         │              └────────── constant pointer to ...
+         └───────────────────────── a volatile uint32_t</code></pre>
+
+  <h2>CMSIS Macros</h2>
+
+  <table>
+    <thead>
+      <tr><th>Macro</th><th>Expands to</th><th>Use for</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>__IO</code></td><td><code>volatile</code></td><td>Read-write registers</td></tr>
+      <tr><td><code>__I</code></td><td><code>volatile const</code></td><td>Read-only registers</td></tr>
+      <tr><td><code>__O</code></td><td><code>volatile</code></td><td>Write-only registers</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Common Bugs</h2>
+
+  <table>
+    <thead>
+      <tr><th>Symptom</th><th>Likely Cause</th><th>Fix</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Polling loop hangs at <code>-O2</code> but works at <code>-O0</code></td>
+        <td>Missing <code>volatile</code> on register/flag</td>
+        <td>Add <code>volatile</code></td>
+      </tr>
+      <tr>
+        <td>ISR flag never seen by main loop</td>
+        <td>Compiler cached the flag value</td>
+        <td>Declare flag as <code>volatile</code></td>
+      </tr>
+      <tr>
+        <td>Register pointer accidentally reassigned</td>
+        <td>Pointer is mutable</td>
+        <td>Add <code>* const</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <hr>
+  <div class="ask-teacher">
+    <strong>Back to:</strong> <a href="../lessons/0001-volatile-and-const.html">Lesson 01 — volatile and const</a>
+  </div>
+
+</body>
+</html>

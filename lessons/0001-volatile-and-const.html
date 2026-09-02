@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 01 — volatile and const: The Compiler Is Not Your Friend</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+  <h1>volatile and const: The Compiler Is Not Your Friend</h1>
+  <p class="lesson-subtitle">Why the compiler will silently break your hardware code — and how two keywords stop it.</p>
+
+  <div class="lesson-meta">
+    <span>📘 Lesson 01</span>
+    <span>⏱ ~25 min</span>
+    <span>🎯 Level 3 — Embedded C</span>
+    <span>🔗 Prereq: Basic C, MMIO concept</span>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The Problem: Optimizing Compilers vs. Hardware Reality</h2>
+
+  <p>You already know that peripherals on an MCU (GPIO, UART, timers) are controlled by reading and writing to special memory addresses — <strong>Memory-Mapped I/O (MMIO)</strong>. To your C code, a hardware register looks like a regular variable at a fixed address.</p>
+
+  <p>Here's the trap. The C compiler's job is to make your code <em>faster</em>. One of its favorite tricks is to <strong>cache a memory value in a CPU register</strong> instead of re-reading it from RAM every time. For normal variables, this is brilliant. For hardware registers, it's catastrophic.</p>
+
+  <p>Consider this bare-metal polling loop on an STM32, checking if a UART has received data:</p>
+
+  <pre><code><span class="cm">// Polling the UART status register (SIMPLIFIED)</span>
+<span class="ty">uint32_t</span> <span class="op">*</span>uart_status <span class="op">=</span> (<span class="ty">uint32_t</span> <span class="op">*</span>)<span class="num">0x40011000</span>;
+
+<span class="kw">while</span> (<span class="op">!</span>(<span class="op">*</span>uart_status <span class="op">&amp;</span> (<span class="num">1</span> <span class="op">&lt;&lt;</span> <span class="num">5</span>))) {
+    <span class="cm">// Wait for RXNE (bit 5) to be set by hardware</span>
+}</code></pre>
+
+  <p>What you <em>expect</em>: the loop reads the register every iteration, checking if the hardware has set bit 5.</p>
+
+  <p>What the compiler <em>does</em> at <code>-O2</code>: "I see you reading <code>*uart_status</code> in a loop, but nothing in <em>your</em> code changes it. I'll just read it once, cache the value, and turn this into an infinite loop. You're welcome."</p>
+
+  <div class="callout danger">
+    <div class="callout-title">⚠ This is a real production bug</div>
+    <p>This exact class of bug has caused robots to lock up mid-competition. The code works perfectly in debug mode (<code>-O0</code>, no optimization). The moment you build a release binary with <code>-O2</code>, the polling loop never exits. It's invisible in code review — the C is correct, the compiler "optimization" is the problem.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The Fix: <code>volatile</code></h2>
+
+  <p>The <code>volatile</code> keyword tells the compiler: <strong>"This value can change at any time for reasons you cannot see. Never cache it. Always read from and write to the actual memory address."</strong></p>
+
+  <pre><code><span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span>uart_status <span class="op">=</span> (<span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span>)<span class="num">0x40011000</span>;
+
+<span class="kw">while</span> (<span class="op">!</span>(<span class="op">*</span>uart_status <span class="op">&amp;</span> (<span class="num">1</span> <span class="op">&lt;&lt;</span> <span class="num">5</span>))) {
+    <span class="cm">// Now the compiler reads from 0x40011000 EVERY iteration.</span>
+    <span class="cm">// No caching. The hardware can update the register between reads.</span>
+}</code></pre>
+
+  <p>That single keyword changes the generated assembly from a cached loop to a genuine memory read on every iteration.</p>
+
+  <h3>The Three Scenarios Where You Need <code>volatile</code></h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Scenario</th>
+        <th>Why Value Changes Invisibly</th>
+        <th>Example</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Memory-Mapped I/O</strong></td>
+        <td>Hardware peripheral updates the register</td>
+        <td>UART status, GPIO input, timer count</td>
+      </tr>
+      <tr>
+        <td><strong>ISR-shared variables</strong></td>
+        <td>An interrupt handler modifies the variable asynchronously</td>
+        <td>A flag set in a timer ISR, checked in <code>main()</code></td>
+      </tr>
+      <tr>
+        <td><strong>Multi-threaded / RTOS</strong></td>
+        <td>Another task or thread writes to shared memory</td>
+        <td>A shared counter between two FreeRTOS tasks</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="margin-note">
+    <strong>Competition tip:</strong> If you're debugging a robot and a sensor reading is "stuck" at a stale value even though the hardware is working, check for a missing <code>volatile</code>. It's one of the first things judges look at too.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The ISR Pattern: Where This Matters Most</h2>
+
+  <p>In competition firmware, you constantly share data between an ISR and your main loop. Here's the classic pattern:</p>
+
+  <pre><code><span class="kw">volatile</span> <span class="ty">uint8_t</span> encoder_tick <span class="op">=</span> <span class="num">0</span>;  <span class="cm">// Shared between ISR and main</span>
+
+<span class="cm">// ISR: fires on encoder edge</span>
+<span class="kw">void</span> <span class="fn">EXTI0_IRQHandler</span>(<span class="kw">void</span>) {
+    encoder_tick <span class="op">=</span> <span class="num">1</span>;
+    <span class="cm">// Clear interrupt flag (omitted for clarity)</span>
+}
+
+<span class="cm">// Main loop: poll for encoder event</span>
+<span class="kw">int</span> <span class="fn">main</span>(<span class="kw">void</span>) {
+    <span class="kw">while</span> (<span class="num">1</span>) {
+        <span class="kw">if</span> (encoder_tick) {
+            encoder_tick <span class="op">=</span> <span class="num">0</span>;
+            <span class="fn">process_encoder</span>();
+        }
+    }
+}</code></pre>
+
+  <p>Without <code>volatile</code>, the compiler sees that <code>main()</code> never sets <code>encoder_tick</code> to 1, so it may optimize the <code>if</code> branch away entirely. Your encoder processing function never runs. The robot doesn't respond to wheel rotations.</p>
+
+  <div class="callout info">
+    <div class="callout-title">💡 What volatile does NOT do</div>
+    <p><code>volatile</code> guarantees the compiler won't optimize away reads/writes. It does <strong>not</strong> make operations atomic. Reading a 32-bit value on an 8-bit MCU still takes multiple instructions, and an ISR can fire in between. For atomicity, you need interrupt masking or RTOS primitives — topics for later lessons.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Adding <code>const</code>: Locking Down the Pointer</h2>
+
+  <p>Now you have a <code>volatile</code> pointer to a hardware register. But what if a bug in your code accidentally changes <em>where the pointer points</em>? Instead of reading from <code>0x40011000</code> (the UART status register), you'd be reading from some random address. On a robot, this could mean reading garbage as a "motor enable" signal.</p>
+
+  <p>The <code>const</code> qualifier prevents this. But <em>where</em> you place <code>const</code> in the declaration matters enormously:</p>
+
+  <pre><code><span class="cm">// Declaration A: pointer is const, data is volatile</span>
+<span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span> <span class="kw">const</span> UART_SR <span class="op">=</span> (<span class="kw">volatile</span> <span class="ty">uint32_t</span> <span class="op">*</span>)<span class="num">0x40011000</span>;
+
+<span class="cm">// Declaration B: data is const (read-only register), pointer is const</span>
+<span class="kw">volatile</span> <span class="kw">const</span> <span class="ty">uint32_t</span> <span class="op">*</span> <span class="kw">const</span> CHIP_ID <span class="op">=</span> (<span class="kw">volatile</span> <span class="kw">const</span> <span class="ty">uint32_t</span> <span class="op">*</span>)<span class="num">0x1FFF7A10</span>;</code></pre>
+
+  <h3>Reading C Declarations: The Right-to-Left Rule</h3>
+
+  <p>C declarations read from the variable name <strong>outward</strong> (or right-to-left). Here's how to parse Declaration A:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Token</th>
+        <th>Reads as</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>UART_SR</code></td><td>is a …</td></tr>
+      <tr><td><code>* const</code></td><td>constant pointer to …</td></tr>
+      <tr><td><code>volatile uint32_t</code></td><td>a volatile 32-bit unsigned integer</td></tr>
+    </tbody>
+  </table>
+
+  <p>Result: <strong>"UART_SR is a constant pointer to a volatile 32-bit unsigned integer."</strong></p>
+
+  <ul>
+    <li>You <strong>can</strong> read and write the data at the address (it's a read-write register)</li>
+    <li>The compiler <strong>must</strong> access memory each time (it's volatile)</li>
+    <li>You <strong>cannot</strong> change where <code>UART_SR</code> points (the pointer is const)</li>
+  </ul>
+
+  <div class="callout success">
+    <div class="callout-title">✅ The idiomatic embedded register declaration</div>
+    <p><code>volatile uint32_t * const REG = (volatile uint32_t *)0xADDRESS;</code></p>
+    <p>This is the pattern used in production CMSIS headers and every professional codebase. Memorize it.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>The Full Spectrum: All Combinations</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Declaration</th>
+        <th>Pointer</th>
+        <th>Data</th>
+        <th>Use Case</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>volatile uint32_t *p</code></td>
+        <td>Mutable</td>
+        <td>Volatile R/W</td>
+        <td>Iterating over register arrays</td>
+      </tr>
+      <tr>
+        <td><code>volatile uint32_t * const p</code></td>
+        <td><strong>Const</strong></td>
+        <td>Volatile R/W</td>
+        <td><strong>Standard R/W register</strong></td>
+      </tr>
+      <tr>
+        <td><code>volatile const uint32_t * const p</code></td>
+        <td><strong>Const</strong></td>
+        <td>Volatile <strong>RO</strong></td>
+        <td>Read-only status / chip ID</td>
+      </tr>
+      <tr>
+        <td><code>const uint32_t * const p</code></td>
+        <td><strong>Const</strong></td>
+        <td><strong>Const</strong></td>
+        <td>Flash-stored lookup table</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="margin-note">
+    <strong>Why "volatile const" isn't a contradiction:</strong> <code>const</code> means <em>your code</em> can't write to it. <code>volatile</code> means <em>something else</em> (hardware) can change it. A status register is both: your firmware reads it, but only the peripheral updates it.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>See It in Real Hardware: CMSIS Headers</h2>
+
+  <p>Open any STM32 CMSIS header (e.g., <code>stm32f4xx.h</code>) and you'll see exactly this pattern in the peripheral struct definitions:</p>
+
+  <pre><code><span class="kw">typedef</span> <span class="kw">struct</span> {
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> SR;    <span class="cm">// Status register       (offset 0x00)</span>
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> DR;    <span class="cm">// Data register          (offset 0x04)</span>
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> BRR;   <span class="cm">// Baud rate register     (offset 0x08)</span>
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> CR1;   <span class="cm">// Control register 1     (offset 0x0C)</span>
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> CR2;   <span class="cm">// Control register 2     (offset 0x10)</span>
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> CR3;   <span class="cm">// Control register 3     (offset 0x14)</span>
+  <span class="kw">volatile</span> <span class="ty">uint32_t</span> GTPR;  <span class="cm">// Guard time/prescaler   (offset 0x18)</span>
+} <span class="ty">USART_TypeDef</span>;
+
+<span class="pp">#define</span> <span class="fn">USART1</span>  ((<span class="ty">USART_TypeDef</span> <span class="op">*</span>)<span class="num">0x40011000</span>)</code></pre>
+
+  <p>Every field is <code>volatile</code>. The <code>#define</code> casts the base address to a pointer to this struct. When you write <code>USART1->CR1 |= (1 << 13);</code>, the compiler generates a real read-modify-write to address <code>0x4001100C</code>. No caching. No optimization. Exactly what the hardware expects.</p>
+
+  <!-- ============================================================ -->
+  <h2>Practice: Test Your Understanding</h2>
+
+  <div class="quiz" data-quiz="q1">
+    <p class="quiz-question">Your robot's encoder ISR sets a <code>uint8_t flag = 1;</code> and your main loop checks <code>if (flag)</code> — but the <code>if</code> block never executes. The code works at <code>-O0</code> but fails at <code>-O2</code>. What's the most likely cause?</p>
+    <ul class="quiz-options">
+      <li class="quiz-option" data-correct="true"><code>flag</code> is missing the <code>volatile</code> qualifier</li>
+      <li class="quiz-option">The ISR has a higher priority than main</li>
+      <li class="quiz-option">The interrupt flag was not cleared in ISR</li>
+      <li class="quiz-option"><code>flag</code> should be declared as <code>const</code></li>
+    </ul>
+    <div class="quiz-feedback correct-feedback">Correct. The compiler cached the value of <code>flag</code> in a CPU register during main's loop. Since nothing in main <em>visibly</em> writes to it, the compiler assumed it couldn't change. <code>volatile</code> prevents this optimization.</div>
+    <div class="quiz-feedback incorrect-feedback">Not quite. The optimization level (-O0 vs -O2) is the clue: the compiler is caching the variable. The ISR sets it correctly, but main never sees the update because the compiler optimized away the re-read. The fix is <code>volatile</code>.</div>
+  </div>
+
+  <div class="quiz" data-quiz="q2">
+    <p class="quiz-question">What does this declaration mean?<br><code>volatile const uint32_t * const CHIP_ID = (volatile const uint32_t *)0x1FFF7A10;</code></p>
+    <ul class="quiz-options">
+      <li class="quiz-option">A mutable pointer to a constant integer</li>
+      <li class="quiz-option" data-correct="true">A constant pointer to a volatile, read-only 32-bit integer</li>
+      <li class="quiz-option">A volatile pointer to a constant 32-bit integer</li>
+      <li class="quiz-option">A constant pointer to a normal 32-bit unsigned integer</li>
+    </ul>
+    <div class="quiz-feedback correct-feedback">Correct. Reading right-to-left: <code>CHIP_ID</code> is a <strong>const pointer</strong> (<code>* const</code>) to a <strong>volatile const uint32_t</strong>. The address is fixed, your code can't write to it, but the hardware might still update it — so the compiler reads from memory every time.</div>
+    <div class="quiz-feedback incorrect-feedback">Remember the right-to-left rule. Start at the variable name and read outward: <code>CHIP_ID</code> → <code>* const</code> (constant pointer) → <code>volatile const uint32_t</code> (volatile, read-only data). The pointer can't move, your code can't write, but hardware can change the value.</div>
+  </div>
+
+  <div class="quiz" data-quiz="q3">
+    <p class="quiz-question">In the CMSIS struct <code>USART_TypeDef</code>, every register field is declared <code>volatile uint32_t</code>. If you removed <code>volatile</code>, what would happen when you read <code>USART1->SR</code> in a polling loop?</p>
+    <ul class="quiz-options">
+      <li class="quiz-option">It would still work because CMSIS uses <code>__IO</code> macros</li>
+      <li class="quiz-option">A linker error at build time</li>
+      <li class="quiz-option" data-correct="true">The compiler might cache the first read, turning the poll into an infinite loop</li>
+      <li class="quiz-option">The MCU would trigger a hard fault exception</li>
+    </ul>
+    <div class="quiz-feedback correct-feedback">Correct. Without <code>volatile</code>, the compiler sees no <em>software</em> path modifying <code>SR</code> and may optimize the read out of the loop. The hardware updates the register, but the CPU keeps checking its cached copy — which never changes. <em>(Note: <code>__IO</code> is just a CMSIS macro that expands to <code>volatile</code>, so removing it and volatile has the same effect.)</em></div>
+    <div class="quiz-feedback incorrect-feedback">No linker error or hard fault — the code compiles and runs, which is what makes this bug so insidious. The compiler optimizes the memory read away because it doesn't see any software write to <code>SR</code>. The polling loop never exits. This is exactly the class of bug <code>volatile</code> prevents.</div>
+  </div>
+
+  <div class="quiz" data-quiz="q4">
+    <p class="quiz-question">You're writing a competition robot's motor controller. You have a <code>volatile uint32_t *motor_speed_reg</code> pointing to a DAC register. A teammate accidentally writes <code>motor_speed_reg = (uint32_t *)0x00000000;</code> somewhere. What change would have prevented this bug?</p>
+    <ul class="quiz-options">
+      <li class="quiz-option">Making the data <code>const</code></li>
+      <li class="quiz-option">Using a <code>#define</code> macro instead</li>
+      <li class="quiz-option" data-correct="true">Declaring as <code>volatile uint32_t * const motor_speed_reg</code></li>
+      <li class="quiz-option">Removing <code>volatile</code> from the declaration</li>
+    </ul>
+    <div class="quiz-feedback correct-feedback">Correct. Adding <code>const</code> after the <code>*</code> makes the <em>pointer itself</em> immutable — the compiler would throw an error on any line that tries to reassign where it points. The data at the register address is still writable (so you can set motor speed), but the address is locked.</div>
+    <div class="quiz-feedback incorrect-feedback">The bug is that the <em>pointer</em> was accidentally reassigned to point to address 0. Making the data <code>const</code> would prevent writing <em>values</em>, but the pointer itself would still be reassignable. A <code>#define</code> macro would also work but loses type safety. The best fix is <code>* const</code> — a constant pointer.</div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>Key Takeaways</h2>
+
+  <ol>
+    <li><strong><code>volatile</code></strong> = "this value changes outside my code's control — never cache it." Use for MMIO registers, ISR-shared variables, and RTOS-shared data.</li>
+    <li><strong><code>const</code> on the pointer</strong> (<code>* const</code>) = "this pointer always points to the same address." Use for fixed hardware register addresses.</li>
+    <li><strong><code>const</code> on the data</strong> (<code>const uint32_t *</code>) = "my code can't write to what this points to." Use for read-only registers.</li>
+    <li>The <strong>idiomatic pattern</strong> is: <code>volatile uint32_t * const REG = (volatile uint32_t *)ADDR;</code></li>
+    <li><code>volatile</code> prevents <strong>optimization bugs</strong>, not <strong>concurrency bugs</strong>. It does not make operations atomic.</li>
+  </ol>
+
+  <!-- ============================================================ -->
+  <h2>📚 Primary Source</h2>
+
+  <p>Read the chapter on <code>volatile</code> in <a href="https://www.oreilly.com/library/view/expert-c-programming/9780133522389/"><em>Expert C Programming: Deep C Secrets</em></a> by Peter van der Linden. For hands-on ARM Cortex-M examples, watch <a href="https://www.youtube.com/c/StateMachineCOM">Miro Samek's "Modern Embedded Systems Programming" Lesson 5</a> which demonstrates the exact assembly-level difference with and without <code>volatile</code>.</p>
+
+  <hr>
+
+  <p><strong>Next up:</strong> <a href="0002-bit-manipulation-no-branches.html">Lesson 02 — Bit Manipulation: Algorithms Without Branches</a> — writing embedded-grade bit tricks for register manipulation, flag management, and branchless algorithms.</p>
+
+  <p><strong>Reference:</strong> <a href="../reference/volatile-const-cheatsheet.html">volatile & const Cheat Sheet</a></p>
+
+  <hr>
+
+  <div class="ask-teacher">
+    <strong>Something unclear?</strong> Ask your teacher (the agent) — type your question in the chat. I can explain any concept deeper, show you the disassembly, or walk through more examples.
+  </div>
+
+  <script src="../assets/quiz.js"></script>
+</body>
+</html>
