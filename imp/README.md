@@ -9,6 +9,7 @@ This folder contains links and files that should **always be consulted** before 
 The user's primary note-taking workspace. Contains handwritten/typed notes on embedded systems topics.
 
 ### Rules
+
 - **NEVER delete or overwrite** existing content in the notebook without explicit user permission.
 - **Read before teaching** — check what the user has already noted to avoid re-teaching known material.
 - **Supplement, don't duplicate** — lessons should complement the notebook, not repeat it.
